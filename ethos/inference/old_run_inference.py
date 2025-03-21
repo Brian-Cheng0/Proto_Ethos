@@ -3,7 +3,7 @@ import multiprocessing as mp
 
 import torch as th
 from tqdm import tqdm
-
+from safetensors.torch import save_file
 from .constants import Test
 
 
@@ -30,14 +30,14 @@ def run_inference(loader, args, num_gpus: int = 8):
     max_timeline_size = context_len + timeline_len
     time_limit = 30 / 365.25 if test_name == Test.READMISSION else 2
     toi = th.tensor(vocab.encode(stoi), device=device, dtype=th.long)
-
-    results = []
+    all_representations = {} 
     for timeline, ground_truth in tqdm(
         loader, proc_name, total=len(loader), position=proc_num, smoothing=0
     ):
         timeline = timeline.to(device)
         gen_token_num = 0
         offset = 0
+        intermediate_representations = []
         while True:
             if test_name == Test.SOFA_PREDICTION and gen_token_num == 1:
                 # append a sofa token to the timeline and continue generating
@@ -45,8 +45,8 @@ def run_inference(loader, args, num_gpus: int = 8):
                     vocab.encode(["SOFA"]), device=timeline.device, dtype=th.long
                 )
             else:
-                last_token, probs = model.get_next_token(timeline[None, ...], return_probs=True)
-
+                last_token, probs, representations = model.get_next_token(timeline[None, ...], return_probs=True, return_representations=True)
+            intermediate_representations.append([r.tolist() for r in representations])
             if not offset and len(timeline) == max_timeline_size:
                 offset = 1
 
@@ -87,22 +87,49 @@ def run_inference(loader, args, num_gpus: int = 8):
         actual_prob = probs[0][last_token.item()].item()
         toi_probs = dict(zip(stoi, probs[0][toi].tolist()))
         timeline_time = vocab.get_timeline_total_time(timeline[-gen_token_num:].cpu(), decode=True)
+        
+        # patient_result={
+        #         "expected": expected,
+        #         "actual": actual,
+        #         "stop_reason": stop_reason,
+        #         "actual_prob": actual_prob,
+        #         **toi_probs,
+        #         **ground_truth,
+        #         "token_dist": gen_token_num,
+        #         "token_time": timeline_time,
+        #         "representations": intermediate_representations,
+        #     }
+            # f"{proc_num}{f'_{suffix}' if suffix is not None else ''}"
 
-        results.append(
-            {
-                "expected": expected,
-                "actual": actual,
-                "stop_reason": stop_reason,
-                "actual_prob": actual_prob,
-                **toi_probs,
-                **ground_truth,
-                "token_dist": gen_token_num,
-                "token_time": timeline_time,
-            }
+        
+        # patient_id = ground_truth["patient_id"]
+        # res_file = results_dir / f"part_{proc_num}{f'_{suffix}' if suffix is not None else ''}"
+        # with res_file.with_suffix(".json").open("w") as f:
+        #     json.dump(results, f, indent=4)
+        # patient_file = results_dir / f"patient_{patient_id}{f'_{suffix}' if suffix else ''}.json"
+        # with patient_file.open("w") as f:
+        #     # json.dump(patient_result, f, indent=4)
+        #     json_data = json.dumps(patient_result, indent=4)
+        #     f.write(json_data)
+        patient_id = ground_truth["patient_id"]
+        all_representations[f"patient_{patient_id}"] = th.tensor(
+            intermediate_representations, dtype=th.float32
         )
+        # representation_file = results_dir / f"patient_{patient_id}.safetensors"
+        # representations_tensor = th.tensor(intermediate_representations, dtype=th.float32)
+        # save_file({"representations": representations_tensor}, str(representation_file))
+        # print(f"Saved representations for patient {patient_id} to {representation_file}")
 
-    res_file = results_dir / f"part_{proc_num}{f'_{suffix}' if suffix is not None else ''}"
-    with res_file.with_suffix(".json").open("w") as f:
-        json.dump(results, f, indent=4)
+        # del intermediate_representations
+        # del representations_tensor
+        # th.cuda.empty_cache()
+        # representations_tensor = th.tensor(intermediate_representations, dtype=th.float32)
+        # save_file({"representations": representations_tensor}, str(representation_file))
+        # print(f"Saved representations for patient {patient_id} to {representation_file}")
 
-    th.cuda.empty_cache()
+        # del intermediate_representations
+        # th.cuda.empty_cache()
+    
+    all_representations_file = results_dir / f"test_patient_new_representation.safetensors"
+    save_file(all_representations, str(all_representations_file))
+    print(f"Saved all representations to {all_representations_file}")

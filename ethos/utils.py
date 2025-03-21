@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from pathlib import Path, PurePath
 from typing import Optional
 
+import types
 import colorlog
 import h5py
 import numpy as np
@@ -87,15 +88,33 @@ def setup_torch(device, dtype, seed=42):
     return ctx
 
 
+# def load_model_from_checkpoint(path, device, for_training=True, **kwargs):
+#     checkpoint = th.load(path, map_location=device)
+#     gptconf = ModelConfig(**checkpoint["model_args"])
+#     model = Ethos(gptconf, **kwargs)
+#     state_dict = checkpoint["model"]
+#     unwanted_prefix = "_orig_mod."
+#     for k, v in list(state_dict.items()):
+#         if k.startswith(unwanted_prefix):
+#             state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+#     model.load_state_dict(state_dict)
+#     if not for_training:
+#         return model, checkpoint["config"].block_size
+#     best_val_loss = checkpoint.get("best_val_loss", 1e9)
+#     return model, checkpoint["iter_num"], best_val_loss, checkpoint["optimizer"]
 def load_model_from_checkpoint(path, device, for_training=True, **kwargs):
-    checkpoint = th.load(path, map_location=device)
+    # Use safe_globals to allow types.SimpleNamespace during unpickling
+    with th.serialization.safe_globals([types.SimpleNamespace]):
+        checkpoint = th.load(path, map_location=device)
+    # Reconstruct the configuration from checkpoint["model_args"]
     gptconf = ModelConfig(**checkpoint["model_args"])
     model = Ethos(gptconf, **kwargs)
     state_dict = checkpoint["model"]
+    # Remove an unwanted prefix (if present) from state_dict keys
     unwanted_prefix = "_orig_mod."
     for k, v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict)
     if not for_training:
         return model, checkpoint["config"].block_size

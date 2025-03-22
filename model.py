@@ -441,7 +441,7 @@ class Ethos(nn.Module):
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """
-        Estimate the model’s MFLOPS utilization (MFU).
+        Estimate the model's MFLOPS utilization (MFU).
 
         Args:
             fwdbwd_per_iter (int): Number of forward/backward passes per iteration.

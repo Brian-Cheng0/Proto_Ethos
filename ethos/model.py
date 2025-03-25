@@ -112,14 +112,16 @@ class TimelinePrototypeMatcher(nn.Module):
             If get_f is True:
                 (event_features, min_distances, indices_reordered)
         """
-        event_features, dist_all = self.subpatch_dist(x)
+        event_features, dist_all = self.subpatch_dist(x)  # (B, num_prototypes, T, n_p)
         if timeline_mask is not None:
-            tm = timeline_mask.unsqueeze(1).unsqueeze(-1)
+            tm = timeline_mask.unsqueeze(1).unsqueeze(-1)  # shape (B, 1, T, 1)
             dist_all = dist_all * tm + (1 - tm) * (-1e5)
-        slots = torch.sigmoid(self.patch_select * self.temp)
-        factor = (slots.sum(-1)).unsqueeze(-1) + 1e-10
-        B, num_proto, T, n_p = dist_all.shape
 
+        # 'slots' is the subpatch weighting; factor is used to rescale
+        slots = torch.sigmoid(self.patch_select * self.temp)  # (1, num_prototypes, n_p)
+        factor = (slots.sum(-1)).unsqueeze(-1) + 1e-10         # (1, num_prototypes, 1)
+
+        B, num_proto, T, n_p = dist_all.shape
         mask_act = torch.ones((B, num_proto, T), device=dist_all.device)
         mask_subpatch = torch.ones((B, num_proto, n_p), device=dist_all.device)
         mask_all = torch.ones((B, num_proto, T, n_p), device=dist_all.device)
@@ -129,11 +131,16 @@ class TimelinePrototypeMatcher(nn.Module):
         values = torch.empty((B, num_proto, 0), device=dist_all.device)
         subpatch_ids = torch.empty((B, num_proto, 0), dtype=torch.long, device=dist_all.device)
 
+        # We iterate over n_p subpatches
         for _ in range(n_p):
+            # Mask out invalid positions
             dist_all_masked = dist_all + (1 - mask_all * adjacent_mask.unsqueeze(-1)) * (-1e5)
-            max_subs, max_subs_id = dist_all_masked.max(dim=2)
-            max_sub_act, max_sub_act_id = max_subs.max(dim=-1)
-            max_event_id = max_subs_id.gather(dim=2, index=max_sub_act_id.unsqueeze(-1))
+            # For each prototype, find the best position in T for each subpatch
+            max_subs, max_subs_id = dist_all_masked.max(dim=2)        # (B, num_proto, n_p)
+            max_sub_act, max_sub_act_id = max_subs.max(dim=-1)        # (B, num_proto)
+            max_event_id = max_subs_id.gather(dim=2, index=max_sub_act_id.unsqueeze(-1))  # (B, num_proto, 1)
+
+            # Build neighbor and directional masks
             neighbor_mask = self.neighboring_mask(max_event_id, T)
             if _ > 0:
                 dir_mask = self.directional_mask(max_event_id, T)
@@ -142,35 +149,39 @@ class TimelinePrototypeMatcher(nn.Module):
                 combined_mask = neighbor_mask
             adjacent_mask = combined_mask
 
-            for b in range(B):
-                for p in range(num_proto):
-                    idx_val = max_event_id[b, p, 0].item()
-                    mask_act[b, p, idx_val] = 0
+            # -- Vectorized approach to set mask_act=0 at positions [b, p, idx_val] --
+            # Instead of calling .item() for each, we gather all indices and use scatter_.
+            max_event_id_2d = max_event_id.squeeze(-1)  # shape (B, num_proto)
+            # shape of mask_act is (B, num_proto, T), we want to zero out dimension=2 at index max_event_id_2d
+            mask_act.scatter_(2, max_event_id_2d.unsqueeze(-1), 0)
 
-            for b in range(B):
-                for p in range(num_proto):
-                    idx_val = max_sub_act_id[b, p].item()
-                    mask_subpatch[b, p, idx_val] = 0
+            # Similarly, vectorize for mask_subpatch, shape (B, num_proto, n_p)
+            # max_sub_act_id shape (B, num_proto)
+            mask_subpatch.scatter_(2, max_sub_act_id.unsqueeze(-1), 0)
 
+            # Now update mask_all to exclude the newly used positions
             mask_all = mask_all * mask_act.unsqueeze(-1)
-            mask_all = mask_all.permute(0, 1, 3, 2)
+            mask_all = mask_all.permute(0, 1, 3, 2)      # (B, num_proto, n_p, T)
             mask_all = mask_all * mask_subpatch.unsqueeze(-1)
-            mask_all = mask_all.permute(0, 1, 3, 2)
+            mask_all = mask_all.permute(0, 1, 3, 2)      # (B, num_proto, T, n_p)
 
+            # Collect subpatch and event indices
             subpatch_ids = torch.cat([subpatch_ids, max_sub_act_id.unsqueeze(-1)], dim=-1)
             indices = torch.cat([indices, max_event_id], dim=-1)
             values = torch.cat([values, max_sub_act.unsqueeze(-1)], dim=-1)
 
+        # Reorder subpatches
         subpatch_ids = subpatch_ids.to(torch.int64)
         _, sub_indexes = subpatch_ids.sort(dim=-1)
         values_reordered = torch.gather(values, dim=-1, index=sub_indexes)
         indices_reordered = torch.gather(indices, dim=-1, index=sub_indexes)
 
         values_slot = values_reordered.clone() * (slots * n_p / factor)
-        max_activation_slots = values_slot.sum(dim=-1)
+        max_activation_slots = values_slot.sum(dim=-1)  # (B, num_proto)
         min_distances = n_p - max_activation_slots
 
         if get_f:
+            # event_features is the original x
             return event_features, min_distances, indices_reordered
         return max_activation_slots, min_distances, indices_reordered
 
@@ -317,9 +328,10 @@ class Ethos(nn.Module):
             if pn.endswith("c_proj.weight"):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
         # Freeze all original Ethos parameters so that only timeline_matcher remains trainable.
-        for name, param in self.named_parameters():
-            if "timeline_matcher" not in name:
-                param.requires_grad = False
+        # Comment to train whole model
+        # for name, param in self.named_parameters():
+        #     if "timeline_matcher" not in name:
+        #         param.requires_grad = False
 
     def get_num_params(self, non_embedding=True):
         """
@@ -366,20 +378,22 @@ class Ethos(nn.Module):
         pos_emb = self.transformer.wpe(pos)
         x = self.transformer.drop(tok_emb + pos_emb)
 
-        # Use the timeline matcher to modify the embeddings.
-        # The timeline matcher returns the original embeddings and min_distances.
-        event_features, min_distances, indices_reordered = self.timeline_matcher.greedy_distance(
-            x, timeline_mask=torch.ones(x.shape[0], x.shape[1], device=x.device), get_f=True
-        )
-        # Compute a bias (scalar per sample) from min_distances and add it to the embeddings,
-        # ensuring that the timeline_matcher influences the final loss.
-        bias = min_distances.mean(dim=1).unsqueeze(-1).unsqueeze(-1)  # shape: (B, 1, 1)
-        x = event_features + bias
-
-        # Continue with the transformer
+        # Process through the transformer blocks first
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
+
+        # Now apply the timeline matcher to the transformer's output
+        # It returns the original embeddings (which in this case are the transformer outputs)
+        # and the min_distances computed from matching.
+        event_features, min_distances, indices_reordered = self.timeline_matcher.greedy_distance(
+            x, timeline_mask=torch.ones(x.shape[0], x.shape[1], device=x.device), get_f=True
+        )
+        # Compute a bias (scalar per sample) from min_distances and add it to the transformer outputs.
+        bias = min_distances.mean(dim=1).unsqueeze(-1).unsqueeze(-1)  # shape: (B, 1, 1)
+        x = event_features + bias
+
+        # Compute final logits and loss
         if targets is not None:
             logits = self.lm_head(x)
             loss = F.cross_entropy(
@@ -394,6 +408,7 @@ class Ethos(nn.Module):
         else:
             logits = self.lm_head(x[:, [-1], :])
             loss = None
+
         if return_representations:
             return logits, loss, x.detach().cpu()
         return logits, loss
@@ -426,7 +441,7 @@ class Ethos(nn.Module):
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         """
-        Estimate the model’s MFLOPS utilization (MFU).
+        Estimate the model's MFLOPS utilization (MFU).
 
         Args:
             fwdbwd_per_iter (int): Number of forward/backward passes per iteration.

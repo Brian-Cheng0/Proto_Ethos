@@ -329,9 +329,9 @@ class Ethos(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
         # Freeze all original Ethos parameters so that only timeline_matcher remains trainable.
         # Comment to train whole model
-        for name, param in self.named_parameters():
-            if "timeline_matcher" not in name:
-                param.requires_grad = False
+        # for name, param in self.named_parameters():
+        #     if "timeline_matcher" not in name:
+        #         param.requires_grad = False
 
     def get_num_params(self, non_embedding=True):
         """

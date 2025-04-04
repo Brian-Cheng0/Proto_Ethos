@@ -16,15 +16,18 @@ def estimate_loss(model, ctx, get_batch: Callable, eval_iters: int, tokens_of_in
     model.eval()
     for split in ["train", "val"]:
         losses = th.empty(eval_iters)
-
+        ethos_losses = th.empty(eval_iters)
+        proto_losses = th.empty(eval_iters)
         all_tokens_res = defaultdict(list)
         toi_res = defaultdict(list)
 
         for i in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, loss, loss_ethos, loss_proto = model(X, Y)
             losses[i] = loss.item()
+            ethos_losses[i] = loss_ethos.item()
+            proto_losses[i] = loss_proto.item()
 
             if split == "val":
                 for k in [1, 3, 5]:
@@ -37,6 +40,8 @@ def estimate_loss(model, ctx, get_batch: Callable, eval_iters: int, tokens_of_in
                             top_k_acc_special(logits, Y, token, k=k, threshold=block_thresh)
                         )
         out[f"loss/{split}"] = losses.mean()
+        out[f"loss_ethos/{split}"] = ethos_losses.mean()
+        out[f"loss_proto/{split}"] = proto_losses.mean()
         out.update({test_name: np.mean(v) for test_name, v in all_tokens_res.items()})
         out.update({test_name: compute_weighted_mean(v) for test_name, v in toi_res.items()})
     model.train()

@@ -341,8 +341,11 @@ def train_ethos(args):
     scaler = th.amp.GradScaler(enabled=(args.dtype == "float16"))
 
     # optimizer
+    # optimizer = model.configure_optimizers(
+    #     args.weight_decay, args.lr, (args.beta1, args.beta2), device
+    # )
     optimizer = model.configure_optimizers(
-        args.weight_decay, args.lr, (args.beta1, args.beta2), device
+        args.weight_decay, args.lr, 1e-6, (args.beta1, args.beta2), device
     )
     if optimizer_state is not None:
         optimizer.load_state_dict(optimizer_state)
@@ -378,6 +381,8 @@ def train_ethos(args):
         # evaluate the loss on train/val sets and write checkpoints
         if iter_num % args.eval_interval == 0 and master_process:
             losses = estimate_loss(model, ctx, get_batch, args.eval_iters, tokens_of_interest)
+            # for loss_name, loss_value in losses.items():
+            #     wandb.log({loss_name: loss_value})
             print(
                 "step {}: train loss {:.4f}, val loss {:.4f}".format(
                     iter_num,
@@ -423,7 +428,7 @@ def train_ethos(args):
 
         if iter_num == 0 and args.eval_only:
             break
-
+        # proto_update_iter = 2000
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
         for micro_step in range(args.gradient_accumulation_steps):
@@ -436,7 +441,9 @@ def train_ethos(args):
                     micro_step == args.gradient_accumulation_steps - 1
                 )
             with ctx:
-                logits, loss = model(X, Y, context_length=context_len)
+                logits, loss, ethos_loss, proto_loss = model(X, Y, context_length=context_len)
+                # if iter_num <= proto_update_iter:
+                #     loss = ethos_loss
                 loss = (
                     loss / args.gradient_accumulation_steps
                 )  # scale the loss to account for gradient accumulation
